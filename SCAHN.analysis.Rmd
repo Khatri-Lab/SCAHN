@@ -1,0 +1,1293 @@
+---
+title: "SCAHN analysis"
+output: html_document
+date: "2025-04-28"
+author: "Hong Zheng"
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r packages}
+library(data.table)
+library(effsize)
+library(DESeq2)
+library(ggalluvial)
+library(ggpubr)
+library(ggrastr)
+library(ggtext)
+library(ggsci)
+library(ggrepel)
+library(ggforce)
+library(pBrackets)
+library(magick)
+library(ComplexHeatmap)
+library(rmeta)
+library(circlize)
+library(viridis)
+library(gridExtra)
+library(scales)
+library(cowplot)
+library(fgsea)
+library(dplyr)
+library(ggbio)
+library(survival)
+library(ggfortify)
+```
+
+```{r functions}
+geomMean <- function(x, na.rm = T){
+  if (!is.numeric(x) && !is.complex(x) && !is.logical(x)) {
+    warning("argument is not numeric or logical: returning NA")
+    return(as.numeric(NA))
+  }
+  if (na.rm)
+    x <- x[!is.na(x)]
+  if (any(x < 0))
+    stop("'x' contains negative value(s)")
+  
+  ### direct method causes overflow errors, use log method instead
+  ### return(prod(x)^(1/length(x)))
+  return(exp(sum(log(x[x>0]))/length(x)))
+}
+
+getGeneScores <- function(geneMtx, pos, neg, makePos = T, out.missing = T){
+  if(out.missing){
+    genes=unique(c(pos,neg))
+    #missingpos = pos[!(pos %in% rownames(geneMtx))]
+    #missingneg = neg[!(neg %in% rownames(geneMtx))]
+    #missing = unique(c(missingpos,missingneg))
+    #missing=genes[!(genes %in% rownames(geneMtx))]
+    missing=setdiff(genes,rownames(geneMtx))
+    #if(length(missing)>=1){
+    cat("Missing these genes:",missing,"\n")
+    #}
+  }
+  pos = pos[pos %in% rownames(geneMtx)]
+  neg = neg[neg %in% rownames(geneMtx)]
+  
+  if(makePos){ #If I need to make everything positive
+    if(any(geneMtx < 0, na.rm=T)){
+      geneMtx <- geneMtx - min(geneMtx, na.rm=T)
+    }
+  }
+  
+  if(length(neg)>=1 && length(pos)>=1){
+    scores <- apply(geneMtx[pos, , drop=F], 2, geomMean, na.rm=T) - apply(geneMtx[neg, , drop=F], 2, geomMean, na.rm=T)
+  }else if(length(pos)>=1){
+    scores <- apply(geneMtx[pos, , drop=F], 2, geomMean, na.rm=T)
+  }else if(length(neg)>=1){
+    scores <- -1*apply(geneMtx[neg, , drop=F], 2, geomMean, na.rm=T)
+  }
+  
+  if(any(is.nan(scores))){ #this means all upgenes or all downgenes were missing from some samples
+    nanIndex = which(is.nan(scores))
+    for(i in nanIndex){
+      my.score = c(geomMean(geneMtx[pos,i,drop=F],na.rm=T),geomMean(geneMtx[neg,i,drop=F],na.rm=T))
+      my.score = my.score[!is.nan(my.score)]
+      if(length(my.score) == 1){
+        scores[i] = my.score
+      }else if(length(my.score) == 2){
+        scores[i] = my.score[1] - my.score[2]
+      }
+    }
+  }
+  
+  return(scores)
+}
+
+ScatterPlotRast <- function(df, featureX, featureY, groupby = NA, colorby = NA, 
+                            label = NA, labeldf = data.frame(), labelfont = "plain", labelsize = 2, repel = F,
+                            mycol = NA, colcateg = "continuous", backgroudcol = "grey97", panelbackgroundcol = "white",nacol = "grey87", 
+                            linesize = 0.2, pointsize = 0.5, rasterdpi = 100, alphalevel = 0.4, 
+                            legendpointsize = 2, legendColumn = 1, legendposition = "right", legendtitle = NA, legendsize = 1, 
+                            numberofrows = 1, facetdirection = "h", scale = "free", facetlabel = "all", facetlabelface = "italic", 
+                            xlab = "", ylab = "", plottitle = "", showaxis = F, showgrid = F, 
+                            textsize = 10, legendtextsize = 10, axistextsize = 10, 
+                            contvarlower = 0.01, contvarupper = 0.99, seed = 42, shuffle = T, addstat = F)
+{
+  textcolor = "#252525"; linecolor = "#252525"
+    
+  if(!is.na(mycol[1]) & colcateg == "discrete"){
+    df[, colorby] = factor(df[, colorby], levels = names(mycol))
+  }
+  
+  if(is.na(mycol[1]) & colcateg == "continuous"){
+    mycol = dichromat_pal("DarkRedtoBlue.12")(12)
+  }
+  
+  if(colcateg == "continuous"){
+    n1 = quantile(df[, colorby], contvarlower)
+    n2 = quantile(df[, colorby], contvarupper)
+    df[, colorby][which(df[, colorby] >= n2)] = n2
+    df[, colorby][which(df[, colorby] <= n1)] = n1
+  }
+  
+  if(shuffle == T){
+    set.seed(seed)
+    df = df[sample(1:nrow(df)),]}
+  
+  if(is.na(groupby)){df$groupdummy = facetlabel}else{df$groupdummy = df[, groupby]}
+  
+  theme_plot = theme(text = element_text(size = textsize, color = textcolor),
+                     panel.grid.minor = element_blank(),
+                     panel.grid.major =element_line(color = "grey87", size = 0.05, linetype = 2),
+                     panel.border = element_blank(),
+                     legend.position = legendposition,
+                     legend.title = element_blank(),
+                     legend.background =  element_blank(),
+                     legend.box.background =  element_blank(),
+                     legend.box.margin = margin(0, 0, 0, 0, "null"),
+                     legend.margin = margin(0, 0, 0, 0, "null"),
+                     legend.justification = c(0, 0.5),
+                     legend.text = element_text(size = legendtextsize, color = textcolor),
+                     legend.key.width = unit(0.3, "line"), legend.key.height = unit(0.5, "line"),
+                     axis.line = element_line(color = linecolor, size = linesize), 
+                     axis.ticks = element_line(color = linecolor, size = linesize),
+                     axis.text =  element_text(size = axistextsize, color = textcolor),
+                     axis.title = element_text(size = textsize, color = textcolor, margin = margin(0, 0, 0, 0, "null")),
+                     plot.title = element_text(size = textsize, color = textcolor, face = "italic", margin = margin(0, 0, 0, 0, "null")),
+                     plot.background = element_rect(color = backgroudcol, fill = backgroudcol),
+                     panel.background = element_rect(color = panelbackgroundcol, fill= panelbackgroundcol),
+                     strip.background = element_rect(color = NA, fill = "grey91"),
+                     strip.text = element_text(size = textsize, face = facetlabelface, color = textcolor, 
+                                               margin = margin(0.1, 0.1, 0.1, 0.1, "line"))
+  )
+  
+  if(colcateg == "continuous"){
+    p =
+      ggplot(df, aes_string(x = featureX, y = featureY)) +
+      theme_void() +
+      geom_point_rast(aes_string(color = colorby), size = pointsize, stroke = 0, alpha = alphalevel, shape = 16, raster.dpi = rasterdpi) +
+      scale_x_continuous(breaks = pretty_breaks()) +
+      scale_y_continuous(breaks = pretty_breaks()) +
+      facet_wrap(. ~ groupdummy, nrow = numberofrows, scales = scale, dir = facetdirection) +
+      labs(title = plottitle) +
+      theme_plot +
+      theme(legend.key.width = unit(legendsize/10, "line"), legend.key.height = unit(legendsize, "line")) +
+      scale_color_gradientn(colours = mycol, name = legendtitle, 
+                            breaks = c(0, round(max(df[, colorby])/2.2,1), round(max(df[, colorby])/2.2,1)*2))
+    
+  }
+  else{
+    p=
+      ggplot(df, aes_string(x = featureX, y = featureY)) +
+      theme_void() +
+      geom_point_rast(aes_string(color = colorby), size = pointsize, stroke = 0, alpha = alphalevel, shape = 16, raster.dpi = rasterdpi) +
+      scale_x_continuous(breaks = pretty_breaks()) +
+      scale_y_continuous(breaks = pretty_breaks()) +
+      facet_wrap(. ~ groupdummy, nrow = numberofrows, scales = scale, dir = facetdirection) +
+      labs(title = plottitle) +
+      theme_plot +
+      scale_color_manual(values = mycol, name = NULL, na.value = "grey93") +
+      guides(color = guide_legend(ncol = legendColumn, label.hjust = 0, override.aes = list(size = legendpointsize, alpha = 0.7))) 
+  }
+  
+  
+  if(!is.na(label) & repel == T){
+    p = p +
+      geom_label_repel(data = df, aes(label=labeltext), size = labelsize, color = "#252525", force = 0.05, fontface = labelfont)
+  }
+  
+  if(!is.na(label) & repel == F){
+    p = p +
+      geom_label(data = df, aes(label = labeltext), size = labelsize, color = "#252525", fontface = labelfont)
+  }
+  
+  if(nrow(labeldf) > 0 & repel == T){
+    p = p +
+      geom_text_repel(data = labeldf, aes(x = x, y = y, label = labeltext),
+                      size = labelsize, color = "#252525", force = 0.05, fontface = labelfont)
+  }  
+  
+  if(nrow(labeldf) > 0  & repel == F){
+    p = p +
+      geom_text(data = labeldf, aes(x = x, y = y, label = labeltext),
+                size = labelsize, color = "#252525", fontface = labelfont)
+  }  
+  
+  if(addstat == T){
+    p = p +
+      stat_cor(method = "spearman", label.x.npc = 0, label.y.npc = 0.95, size = labelsize, color = "grey67")
+  }
+  
+  if(showaxis == F){
+    p = p + theme(axis.line = element_blank(), axis.title = element_blank(), axis.ticks = element_blank(), axis.text = element_blank())
+  }
+  
+  if(showgrid == F){
+    p = p + theme(panel.grid.major = element_blank())
+  }
+  
+  return(p)
+}
+
+ScatterPlotRastNoFacet <- function(df, featureX, featureY, colorby = NA, 
+                                   label = NA, labeldf = data.frame(), labelfont = "plain", labelsize = 2, repel = F,
+                                   mycol = NA, colcateg = "continuous", backgroudcol = "grey97", nacol = "grey87", 
+                                   linesize = 0.2, pointsize = 0.5, rasterdpi = 100, alphalevel = 0.4, 
+                                   legendpointsize = 2, legendColumn = 1, legendposition = "right", legendtitle = NA, legendsize = 1, 
+                                   numberofrows = 1, facetdirection = "h", scale = "free", facetlabel = "all", facetlabelface = "italic", 
+                                   xlab = "", ylab = "", plottitle = "", showaxis = F, showgrid = F, 
+                                   textsize = 10, legendtextsize = 10, axistextsize = 10, 
+                                   contvarlower = 0.01, contvarupper = 0.99, seed = 42, shuffle = T, addstat = F)
+{
+  textcolor = "#252525"; linecolor = "#252525"
+    
+  if(!is.na(mycol[1]) & colcateg == "discrete"){
+    df[, colorby] = factor(df[, colorby], levels = names(mycol))
+  }
+  
+  if(is.na(mycol[1]) & colcateg == "continuous"){
+    mycol = dichromat_pal("DarkRedtoBlue.12")(12)
+  }
+  
+  if(colcateg == "continuous"){
+    n1 = quantile(df[, colorby], contvarlower)
+    n2 = quantile(df[, colorby], contvarupper)
+    df[, colorby][which(df[, colorby] >= n2)] = n2
+    df[, colorby][which(df[, colorby] <= n1)] = n1
+  }
+  
+  if(shuffle == T){
+    set.seed(seed)
+    df = df[sample(1:nrow(df)),]}
+  
+  theme_plot = theme(text = element_text(size = textsize, color = textcolor),
+                     panel.grid.minor = element_blank(),
+                     panel.grid.major = element_line(color = "grey87", size = 0.05, linetype = 2),
+                     panel.border = element_blank(),
+                     legend.position = legendposition,
+                     legend.title = element_blank(),
+                     legend.background =  element_blank(),
+                     legend.box.background =  element_blank(),
+                     legend.box.margin = margin(0, 0, 0, 0, "null"),
+                     legend.margin = margin(0, 0, 0, 0, "null"),
+                     legend.justification = c(0, 0.5),
+                     legend.text = element_text(size = legendtextsize, color = textcolor),
+                     legend.key.width = unit(0.3, "line"), legend.key.height = unit(0.5, "line"),
+                     axis.line = element_line(color = linecolor, size = linesize), 
+                     axis.ticks = element_line(color = linecolor, size = linesize),
+                     axis.text =  element_text(size = axistextsize, color = textcolor),
+                     axis.title = element_text(size = textsize, color = textcolor, margin = margin(0, 0, 0, 0, "null")),
+                     plot.title = element_text(size = textsize, color = textcolor, face = "italic", margin = margin(0, 0, 0, 0, "null")),
+                     plot.background = element_rect(color = backgroudcol, fill = backgroudcol),
+                     strip.background = element_rect(color = NA, fill = "grey91"),
+                     strip.text = element_text(size = textsize, face = facetlabelface, color = textcolor, 
+                                               margin = margin(0.1, 0.1, 0.1, 0.1, "line"))
+  )
+  
+  
+  if(colcateg == "continuous"){
+    p =
+      ggplot(df, aes_string(x = featureX, y = featureY)) +
+      theme_void() +
+      geom_point_rast(aes_string(color = colorby), size = pointsize, stroke = 0, alpha = alphalevel, shape = 16, raster.dpi = rasterdpi) +
+      scale_x_continuous(breaks = pretty_breaks()) +
+      scale_y_continuous(breaks = pretty_breaks()) +
+      labs(title = plottitle) +
+      theme_plot +
+      theme(legend.key.width = unit(legendsize/10, "line"), legend.key.height = unit(legendsize, "line")) +
+      scale_color_gradientn(colours = mycol, name = legendtitle, 
+                            breaks = c(0, round(max(df[, colorby])/2.2,1), round(max(df[, colorby])/2.2,1)*2))
+  }
+  else{
+    p=
+      ggplot(df, aes_string(x = featureX, y = featureY)) +
+      theme_void() +
+      geom_point_rast(aes_string(color = colorby), size = pointsize, stroke = 0, alpha = alphalevel, shape = 16, raster.dpi = rasterdpi) +
+      scale_x_continuous(breaks = pretty_breaks()) +
+      scale_y_continuous(breaks = pretty_breaks()) +
+      labs(title = plottitle) +
+      theme_plot +
+      scale_color_manual(values = mycol, name = NULL, na.value = "grey93") +
+      guides(color = guide_legend(ncol = legendColumn, label.hjust = 0, override.aes = list(size = legendpointsize, alpha = 0.7))) 
+  }
+  
+  
+  if(!is.na(label) & repel == T){
+    p = p +
+      geom_label_repel(data = df, aes(label=labeltext), size = labelsize, color = "#252525", force = 0.05, fontface = labelfont)
+  }
+  
+  if(!is.na(label) & repel == F){
+    p = p +
+      geom_label(data = df, aes(label = labeltext), size = labelsize, color = "#252525", fontface = labelfont)
+  }
+  
+  if(nrow(labeldf) > 0 & repel == T){
+    p = p +
+      geom_text_repel(data = labeldf, aes(x = x, y = y, label = labeltext),
+                      size = labelsize, color = "#252525", force = 0.05, fontface = labelfont)
+  }  
+  
+  if(nrow(labeldf) > 0  & repel == F){
+    p = p +
+      geom_text(data = labeldf, aes(x = x, y = y, label = labeltext),
+                size = labelsize, color = "#252525", fontface = labelfont)
+  }  
+  
+  if(addstat == T){
+    p = p +
+      stat_cor(method = "spearman", label.x.npc = 0, label.y.npc = 0.95, size = labelsize, color = "grey67")
+  }
+  
+  if(showaxis == F){
+    p = p + theme(axis.line = element_blank(), axis.title = element_blank(), axis.ticks = element_blank(), axis.text = element_blank())
+  }
+  
+  if(showgrid == F){
+    p = p + theme(panel.grid.major = element_blank())
+  }
+  
+  return(p)
+}
+
+GetRownamesCombineDuplicate <- function(geneMtx, keys){
+  if(length(keys) == length(unique(keys))){
+    return(geneMtx)
+  }
+  dupvals = unique(keys[duplicated(keys)])
+  duplicateindex = keys %in% dupvals
+  duplicategenes = geneMtx[duplicateindex,,drop= F]
+  uniquegenes = geneMtx[!duplicateindex,,drop= F]
+  rownames(uniquegenes)= as.character(keys[!duplicateindex])
+  
+  newvals = do.call(rbind, lapply(dupvals, function(val){
+    dupindex = which(keys[rownames(duplicategenes)] == val)
+    dupmat = duplicategenes[dupindex, , drop = F]
+    # replace NA values with the average of the other values in that column
+    if(any(is.na(dupmat))){
+      dupmat = apply(dupmat, 2, function(x){
+        if(any(is.na(x))){
+          avg = mean(x[!is.na(x)])
+          x[is.na(x)] = avg
+        }
+        return(x)
+      })
+    }
+    # average all rows
+    return(colMeans(dupmat))
+  }))
+  
+  rownames(newvals) = dupvals
+  if(any(is.na(rownames(newvals)))){ #removing the row named "NA"
+    NArow = which(is.na(rownames(newvals)))
+    newvals = newvals[-NArow, ]
+  }
+  return(rbind(uniquegenes, newvals))
+}
+
+# score_comparison <- function(dat, cases, controls){
+#   res = dat[, .(
+#     pval = wilcox.test(value[condition %in% cases], value[condition %in%  controls])$p.value,
+#     ES.g =  cohen.d(value[condition %in%cases], value[condition %in% controls], hedges.correction=TRUE)$estimate,
+#     ES.se =  sqrt(cohen.d(value[condition %in%cases], value[condition %in% controls], hedges.correction=TRUE)$var),
+#     Ncase = length(value[condition %in% cases]),
+#     Ncontrol = length(value[condition %in% controls]),
+#     samplesize = length(value[condition %in% c(cases, controls)])
+#   ),
+#   by = .(variable, pid)]
+# }
+
+score_comparison <- function(dat, cases, controls){
+  res = dat[, {
+    # Extract values for cases and controls
+    case_values <- value[condition %in% cases]
+    control_values <- value[condition %in% controls]
+    
+    # Check if the expression is invariable across both groups:
+    if(length(unique(c(case_values, control_values))) == 1){
+      # If invariable, assign neutral estimates
+      list(pval = 1,
+           ES.g = 0,
+           ES.se = 1,
+           Ncase = length(case_values),
+           Ncontrol = length(control_values),
+           samplesize = length(c(case_values, control_values)))
+    } else {
+      # Otherwise, compute as usual
+      wt <- wilcox.test(case_values, control_values)
+      cd <- cohen.d(case_values, control_values, hedges.correction=TRUE)
+      list(pval = wt$p.value,
+           ES.g = cd$estimate,
+           ES.se = sqrt(cd$var),
+           Ncase = length(case_values),
+           Ncontrol = length(control_values),
+           samplesize = length(c(case_values, control_values)))
+    }
+  }, by = .(variable, pid)]
+  return(res)
+}
+
+metaStats <- function(dd, geneid, pids, case, control){
+  dfes = score_comparison(dd[variable %in% geneid & pid %in% pids], 
+                          cases = case, controls = control)
+  dfes = dfes[order(variable)]
+  dfes$rowname = paste0(dfes$pid, " (N1 = ",dfes$Ncase, ", N0 = ",dfes$Ncontrol, ")")
+  dfes$index = nrow(dfes):1
+  dfes = dfes[, c("ES.g", "ES.se", "samplesize", "pval", "rowname", "index")]
+  dfes.summary = pool.inverseVar(t(data.frame(genes = dfes$ES.g)), t(data.frame(genes = dfes$ES.se)),method = "random")
+  dfes.summary = as.data.frame(dfes.summary)
+  dfes.summary$ES.g = dfes.summary$summary
+  dfes.summary$ES.se = dfes.summary$se.summary
+  dfes.summary$samplesize = NA
+  dfes.summary$pval = dfes.summary$p.value
+  dfes.summary$rowname = "summary"
+  dfes.summary$index = 0
+  dfes = rbind(dfes,dfes.summary[, c("ES.g", "ES.se", "samplesize", "pval", "rowname", "index")])
+  dfes$gene = geneid
+  dfes[, label:=ifelse(rowname == "summary", paste0("ES:", round(ES.g, 2), "\npval:", formatC(pval, format = "e", digits = 1)), NA)]
+  return(dfes)
+}
+
+metaPlots<- function(datadf, boxsize = 1, conf.level = 0.95, mycol = "grey",
+                     plottitle = NULL, titleface = "plain", stripxface = "plain",labex = 2, textsize = 8, summaryy = c(0, -0.4, 0, 0.4))
+{
+  nth <- function(x, i) {
+    x[(i - 1)%%length(x) + 1]
+  }
+  ci.value <- -qnorm((1 - conf.level)/2)
+  
+  datadf$lower <- datadf$ES.g - ci.value * datadf$ES.se
+  datadf$upper <- datadf$ES.g + ci.value * datadf$ES.se
+  datadf$samplesize = datadf$samplesize / max(datadf$samplesize, na.rm = T)
+  
+  # summary
+  if(!"summary" %in% rownames(datadf)){
+    datadfsummary = datadf[nrow(datadf),]}
+  else{
+    datadfsummary = datadf[rowname == "summary"]}
+  
+  dfpolygon = data.table(x = c(datadfsummary$lower, datadfsummary$ES.g, datadfsummary$upper, datadfsummary$ES.g),
+                         y = summaryy)
+  
+  datadf[nrow(datadf), c("lower", "upper", "samplesize") := list(NA, NA, NA)]
+  
+  # dfpolygon = data.table(x = c(datadf[rowname == "summary"]$lower, datadf[rowname == "summary"]$ES.g, datadf[rowname == "summary"]$upper, datadf[rowname == "summary"]$ES.g),
+  #                        y = summaryy)
+  # 
+  # datadf[rowname == "summary"]$lower = NA
+  # datadf[rowname == "summary"]$upper = NA
+  # datadf[rowname == "summary"]$samplesize = NA
+  
+  p = ggplot(datadf, aes_string(x = "ES.g", y = "index")) +
+    theme_bw() +
+    geom_vline(xintercept = 0, linetype = 2, alpha = 1, color = "grey62", size = 0.4) +
+    geom_hline(yintercept = c(-0.5, 0.5), linetype = 1, alpha = 1, color = textcolor, size = linesize) +
+    geom_errorbarh(alpha = 0.8, height = 0.4, size = 0.4, aes_string(xmax = "upper", xmin = "lower"), color = mycol) +
+    geom_tile(aes(width = samplesize / 20 * boxsize), height = 0.5, fill = mycol, color = NA) +
+    geom_polygon(data = dfpolygon, aes_string(x = "x", y = "y"), fill = mycol, color = NA) +
+    scale_y_continuous(position = "right", breaks = datadf$index, labels = datadf$rowname, limits = c(-0.51, max(datadf$index) + 0.51), expand = c(0,0)) +
+    labs(x = "effect size", title = plottitle, y = NULL) +
+    facet_wrap(. ~ gene, scales = "free_x", nrow = 1) +
+    geom_text(data = data.frame(x = labex, y = 0, label = datadfsummary$label), mapping = aes(x = x, y = y, label = label), color = "grey17", size = 2, parse = F, hjust = 0, lineheight = 0.7) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x =element_line(color = "grey67", size = 0.05, linetype = 2),
+      panel.grid.major.y = element_blank(),
+      panel.background  = element_rect(color = NA, size = 0, fill = "grey98"),
+      panel.border = element_blank(),
+      axis.ticks = element_blank(),
+      axis.line = element_blank(),
+      axis.text = element_text(size = textsize, color = textcolor, margin = margin(0, 0, 0, 0, "line")),
+      axis.text.y = element_text(size = textsize, color = textcolor),
+      plot.title = element_text(size = textsize, face = titleface, margin = margin(0, 0, 0, 0, "line")),
+      axis.title = element_text(size = textsize, color = textcolor),
+      axis.title.x = element_text(size = textsize, color = textcolor, margin = margin(0, 0, 0, 0, "null")),
+      axis.title.y = element_text(size = textsize, color = textcolor),
+      strip.background = element_rect(color = NA, fill = "grey89", size = 1),
+      strip.text.x = element_text(margin = margin(0.08, 0, 0.08, 0, "line"), face = stripxface),
+      strip.text.y = element_text(size = textsize, margin = margin(0, 0, 0, 0, "line"))
+    )
+  return(p)
+}
+
+metaPlotsNoRowName <- function(datadf, boxsize = 1, conf.level = 0.95, mycol = "grey",
+                               plottitle = NULL, titleface = "plain", stripxface = "plain",labex = 2, textsize = 8, summaryy = c(0, -0.4, 0, 0.4))
+{
+  nth <- function(x, i) {
+    x[(i - 1)%%length(x) + 1]
+  }
+  ci.value <- -qnorm((1 - conf.level)/2)
+  
+  datadf$lower <- datadf$ES.g - ci.value * datadf$ES.se
+  datadf$upper <- datadf$ES.g + ci.value * datadf$ES.se
+  datadf$samplesize = datadf$samplesize / max(datadf$samplesize, na.rm = T)
+  
+  # summary
+  datadfsummary = datadf[nrow(datadf),]
+  dfpolygon = data.table(x = c(datadfsummary$lower, datadfsummary$ES.g, datadfsummary$upper, datadfsummary$ES.g),
+                         y = summaryy)
+  
+  datadf[nrow(datadf), c("lower", "upper", "samplesize") := list(NA, NA, NA)]
+  
+  p = ggplot(datadf, aes_string(x = "ES.g", y = "index")) +
+    theme_bw() +
+    geom_vline(xintercept = 0, linetype = 2, alpha = 1, color = "grey62", size = 0.4) +
+    geom_hline(yintercept = c(-0.5, 0.5), linetype = 1, alpha = 1, color = textcolor, size = linesize) +
+    geom_errorbarh(alpha = 0.8, height = 0.4, size = 0.4, aes_string(xmax = "upper", xmin = "lower"), color = mycol) +
+    geom_tile(aes(width = samplesize / 20 * boxsize), height = 0.5, fill = mycol, color = NA) +
+    geom_polygon(data = dfpolygon, aes_string(x = "x", y = "y"), fill = mycol, color = NA) +
+    scale_y_continuous(position = "right", breaks = datadf$index, labels = datadf$rowname, limits = c(-0.51, max(datadf$index) + 0.51), expand = c(0,0)) +
+    labs(x = "effect size", title = plottitle, y = NULL) +
+    facet_wrap(. ~ gene, scales = "free_x", nrow = 1) +
+    geom_text(data = data.frame(x = labex, y = 0, label = datadfsummary$label), mapping = aes(x = x, y = y, label = label), color = "grey17", size = 2, parse = F, hjust = 0, lineheight = 0.7) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x =element_line(color = "grey67", size = 0.05, linetype = 2),
+      panel.grid.major.y = element_blank(),
+      panel.background  = element_rect(color = NA, size = 0, fill = "grey98"),
+      panel.border = element_blank(),
+      axis.ticks = element_blank(),
+      axis.line = element_blank(),
+      axis.text = element_text(size = textsize, color = textcolor, margin = margin(0, 0, 0, 0, "line")),
+      axis.text.y = element_text(size = textsize, color = textcolor),
+      plot.title = element_text(size = textsize, face = titleface, margin = margin(0, 0, 0, 0, "line")),
+      axis.title = element_text(size = textsize, color = textcolor),
+      axis.title.x = element_text(size = textsize, color = textcolor, margin = margin(0, 0, 0, 0, "null")),
+      axis.title.y = element_text(size = textsize, color = textcolor),
+      strip.background = element_rect(color = NA, fill = "grey89", size = 1),
+      strip.text.x = element_text(margin = margin(0.08, 0, 0.08, 0, "line"), face = stripxface),
+      strip.text.y = element_text(size = textsize, margin = margin(0, 0, 0, 0, "line"))
+    )
+  return(p)
+}
+
+pool.inverseVar < function(g, se.g, method){
+  require(rmeta)
+  stopifnot( identical( rownames(g), rownames(se.g) ) )
+  out <- matrix( nr=nrow(g), nc=8,
+                 dimnames=list( rownames(g), c("n.studies", "summary", "se.summary", "tau2", "p.value", "Q", "df", "pval.het") ) )
+  
+  cleanNA <- function(x) return( x[!is.na(x) & is.finite(x) ] )
+  for(j in 1:nrow(g)){
+    
+    e  <- cleanNA(    g[j, ] )
+    se <- cleanNA( se.g[j, ] )
+    n  <- length(e)
+    
+    if(n==1){
+      summ <- e;   se.summ <- se;   tau2 <- NA
+      Q.het = NA
+      df.het = NA
+      pval.het = NA
+    } else {
+      fit <- meta.summaries(e, se, method = method)
+      summ <- fit$summary
+      se.summ <- fit$se.summary
+      tau2 <- ifelse( method=="fixed", NA, fit$tau2 )
+      Q.het = fit$het[1]
+      df.het = fit$het[2]
+      pval.het = fit$het[3]
+      rm(fit)
+    }
+    
+    pval     <- 2*pnorm( abs(summ/se.summ), lower.tail=FALSE )
+    
+    out[j, ] <- c(n, summ, se.summ, tau2, pval, Q.het, df.het, pval.het)
+    rm(e, se, n, summ, se.summ, tau2, pval, Q.het, df.het, pval.het)
+  }
+  return(out)
+}
+```
+
+```{r figure settings}
+textsize = 10
+axistextsize = 8
+legendtextsize = 8
+legendpointsize = 2
+pointsize = 0.3
+pointsizen = 0.1
+linesize = 0.1
+gridlwd = 0.4
+clustercolumns = F
+clusterrows = F
+showrowdend = F
+showcolumndend = F
+showheatmaplegend = F
+
+textcolor = linecolor = linecolor = "#252525" 
+  
+backgroundcol = "white"
+  
+mythemenull = theme_bw() + 
+  theme(axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.border = element_blank(),
+        panel.grid = element_blank())
+
+mytheme =
+  theme(text = element_text(size = textsize, color = textcolor),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(color = "grey67", linewidth = 0.05, linetype = 2),
+        panel.border = element_blank(),
+        legend.title =  element_blank(),
+        legend.position = "right",
+        legend.key.width = unit(0.3, "line"),
+        legend.key.height = unit(0.7, "line"),
+        legend.text = element_text(margin = margin(0, 0, 0, 0.1, "line")),
+        legend.key.spacing.x = unit(.1, "line"),
+        legend.key.spacing.y = unit(.1, "line"),
+        legend.key.size = unit(1, 'lines'),
+        axis.line = element_line(color = linecolor,linewidth = linesize),
+        axis.ticks = element_line(color = linecolor,linewidth = linesize),
+        axis.text =  element_text(size = textsize, color = textcolor),
+        axis.title = element_text(size = textsize, color = textcolor),
+        plot.title = element_text(size = textsize, color = textcolor, face = "plain"),
+        strip.background = element_rect(color = NA, fill = "grey91"),
+        strip.text.x = element_text(size = textsize, color = textcolor, margin = margin(0.05, 0, 0.05,0, "line"))
+  )
+
+col_pid = c(chan2021 = "#FFF143", chen2020 = "#FDD834", combes2021 = "#000080", 
+            deng2021 = "#EE4C97", garridotrigo2023 = "#FFE099", gupta2020 = "#A60021", 
+            habermann2020 = "#2F4F4F", han2020 = "#F3D3E7", hu2022 = "#5E2D30", 
+            hu2023 = "#73DAFF", jardine2021 = "#FFC0CB", kaiser2024 = "#F47F17", 
+            kwok2023 = "grey67", liao2020 = "#2A0BD9", maynard2020 = "#40A1FF", 
+            montaldo2022 = "#FFAD73", moreno2022 = "#28231D", myin2024 = "#EAFF56", 
+            qian2020 = "#8CC269", qiu2021 = "#1A5E1F", ren2021 = "#FFFFBF", 
+            reyfman2019 = "#FF00FF", salcher2022 = "#DDB952", schrepping2020 = "#1C77A3", 
+            schupp2020 = "#FD8CC1", sinha2021 = "#D1C4E9", suo2022 = "#E0FFFF", 
+            tabulasapiens2022 = "#6A1A99", wang2021 = "#FFFF00", wang2023 = "#CD92D8", 
+            wigerblad2022 = "#E9D097", wilhelm2024 = "#CE5E8A", wilk2021 = "#D92632", 
+            wu2024 = "#264EFF", xue2023 = "#2BAE85", yang2022 = "#ABF8FF", yang2023 = "#7E57C1", 
+            zhang2023 = "#00FF00", zhu2022 = "#F76E5E", zilionis2019 = "#C7E5C9"
+)
+
+col_group = c(healthy = "#1A6840", convalescent = "#4EAE3C", `COVID-19` = "#EFC000", 
+              `COVID-19,nonsevere` = "#7b72c5", `COVID-19,severe` = "#EFC000", 
+              `bacterial sepsis` = "#F97D1C", flu = "cyan", `flu,pregnancy` = "green", 
+              pregnancy = "lightgreen", `lung cancer` = "#DC3023", `GI cancer` = "#FF0097", 
+              `kidney cancer` = "#6A1A99", `colorectal cancer` = "#CE5E8A", 
+              `brain tumor` = "#7C1823", `other cancer` = "#EEA2A4", asthma = "#142334", 
+              `other lung disease` = "#352A87", CVD = "#0E5FDB", diabetes = "#C5BB5C", 
+              `autoimmune disease` = "#06A5C7", `HSC-T` = "#FFDFB2", `healthy,G-CSF/IFN` = "#C7E5C9FF", 
+              fetus = "#D6BBCF", `other disease` = "grey87")
+
+col_tissue = c(`peripheral blood` = "#EDD1D8", `cord blood` = "#FBC831", `bone marrow` = "#73DAFF", 
+               lung = "#DC3023", BALF = "#BEC936", sputum = "#0E5FDB", liver = "#B35C44", 
+               colonrectum = "#EE6C00", pancreas = "#FF0097", stomach = "#CE5E8A", 
+               kidney = "#B0A4E3", brain = "#7C1823", spleen = "#A5D6A6", `other GI organs` = "#FFDFB2", 
+               `urinary system` = "#352A87", other = "grey77")
+
+col_celltype_v1 = c("AZU1,MPO" = "#DC3023",
+                    "LTF,CAMP" = "#F47B00", 
+                    "MMP9" = "#F8D626",
+                    "MME" = "#80C684",
+                    "IL1R2" = "cyan",
+                    "TXNIP" = "#D1BA58",
+                    "Jun/Fos" = "#2BAE85",
+                    "EGR1" = "#1A5E1F", 
+                    "PLAUR" = "#FFDFB2",
+                    "IFN 1" = "#2E42B8",
+                    "IFN 2" = "#BADEFA",
+                    "IFN 3" = "#264EFF",
+                    "NF-κB" = "#5E34B1", 
+                    "IL1B" = "#ccabb4", 
+                    "VEGFA" = "#B29DDA", 
+                    "CCL3/4" = "#acf300",  
+                    "SLPI,PI3" = "#73DAFF",  
+                    "ARHGAP26" = "#C7E5C9",
+                    "HSP" = "#C0D8D8", 
+                    "CD74" = "#e9e4c4",  
+                    "Neu-Lym" = "grey77"
+)
+
+col_celltype = c("AZU1" = "#DC3023",
+                 "LTF" = "#F47B00", 
+                 "MMP9" = "#F8D626",
+                 "MME" = "#80C684",
+                 "IL1R2" = "cyan",
+                 "TXNIP" = "#D1BA58",
+                 "AP-1" = "#2BAE85",
+                 "EGR1" = "#1A5E1F", 
+                 "G0S2" = "#FFDFB2",
+                 "IFN1" = "#2E42B8",
+                 "IFN2" = "#BADEFA",
+                 "IFN3" = "#264EFF",
+                 "NF-κB" = "#5E34B1", 
+                 "IL1B" = "#ccabb4", 
+                 "VEGFA" = "#B29DDA", 
+                 "CCL3/4" = "#acf300",  
+                 "SLPI" = "#73DAFF",  
+                 "ARHGAP26" = "#C7E5C9",
+                 "HSP" = "#C0D8D8", 
+                 "CD74" = "#e9e4c4",  
+                 "Neu-Lym" = "grey77"
+)
+
+celltypenamechange = names(col_celltype)
+names(celltypenamechange) = names(col_celltype_v1)
+
+col_set = c("IMNeuS" = "#a93434",
+            "TNeuS" = "#1A5E1F",
+            "IFN genes" = "#2E42B8",
+            "other" = "grey77"
+)
+
+col_set2 = c("IMNeuS" = "#a93434",
+             "TNeuS" = "#1A5E1F",
+             "IFN genes" = "#2E42B8",
+             "other" = "grey67"
+)
+```
+
+```{r load data}
+dir = "/labs/khatrilab/hongzheng/singlecell/neutrophil/rds/"
+dir.fig = "/labs/khatrilab/hongzheng/singlecell/neutrophil/figures/"
+
+# meta data of samples
+samplemeta = fread(paste0(dir, "samplemta.v10f.csv"))
+samplemeta$cohort = samplemeta$pid
+samplemeta$pid = gsub("a$|b$|c$|d$", "", samplemeta$pid)
+samplemeta$pid = gsub("myin2024b", "yin2024", samplemeta$pid)
+samplemeta$pid = gsub("reyfman2018", "reyfman2019", samplemeta$pid)
+samplemeta$pid = gsub("xue2022", "xue2023", samplemeta$pid)
+
+# meta data of cells
+dtf = readRDS(paste0(dir, "dtf.pc25.v10f.rds"))
+dtfmore = readRDS(paste0(dir, "dtf.v10f.cellmeta.rds"))
+
+dtf[, celltype:=ifelse(celltype %in% names(celltypenamechange), celltypenamechange[celltype], celltype)]
+
+dtf$pid = samplemeta[match(dtf$sampleid.pid, samplemeta$sampleid.pid)]$pid
+dtf$cohort = samplemeta[match(dtf$sampleid.pid, samplemeta$sampleid.pid)]$cohort
+dtf$subjectid = samplemeta[match(dtf$sampleid.pid, samplemeta$sampleid.pid)]$subjectid
+dtf$sex = samplemeta[match(dtf$sampleid.pid, samplemeta$sampleid.pid)]$sex
+dtf$age = samplemeta[match(dtf$sampleid.pid, samplemeta$sampleid.pid)]$age
+dtf$tissue = samplemeta[match(dtf$sampleid.pid, samplemeta$sampleid.pid)]$tissue
+dtf$tissue.detail = samplemeta[match(dtf$sampleid.pid, samplemeta$sampleid.pid)]$tissue.detail
+dtf$group = samplemeta[match(dtf$sampleid.pid, samplemeta$sampleid.pid)]$group
+dtf$group.detail = samplemeta[match(dtf$sampleid.pid, samplemeta$sampleid.pid)]$group.detail
+dtf$severity = samplemeta[match(dtf$sampleid.pid, samplemeta$sampleid.pid)]$severity
+dtf$source = samplemeta[match(dtf$sampleid.pid, samplemeta$sampleid.pid)]$source
+dtf$other = samplemeta[match(dtf$sampleid.pid, samplemeta$sampleid.pid)]$other
+dtf$technique = samplemeta[match(dtf$sampleid.pid, samplemeta$sampleid.pid)]$technique
+
+dtf = cbind(dtf, dtfmore[,c("nCount_RNA", "nFeature_RNA", "pct.mt", "S.Score", "G2M.Score", "cxds_score", "bcds_score", "hybrid_score")])
+```
+
+# --------------------- ANALYSIS ---------------------
+# Subset proportions
+
+```{r subset proportion}
+celltotalnumber = readRDS(paste0(dir, "cellnumber.rds"))
+
+dtf$cluster = dtf$celltype
+dtf.s.pct = as.data.frame(dcast(dtf[,.N, by = c("sampleid.pid", "cluster")], sampleid.pid ~ cluster, value.var = "N"))
+rownames(dtf.s.pct) = dtf.s.pct$sampleid.pid
+dtf.s.pct$sampleid.pid = NULL
+dtf.s.pct[is.na(dtf.s.pct)] = 0
+dim(dtf.s.pct) # 879  21
+dtf.s.N = rowSums(dtf.s.pct)
+
+dim(dtf.s.pct) # 879
+
+dtf.s.pct = apply(dtf.s.pct, 2, function(x){x / rowSums(dtf.s.pct)})
+dtf.s.pct = as.data.frame(dtf.s.pct)
+dtf.s.pct$sampleid.pid = rownames(dtf.s.pct)
+dtf.s.pct$number.neutrophil = dtf.s.N[dtf.s.pct$sampleid.pid]
+dtf.s.pct = as.data.table(dtf.s.pct)
+dtf.s.pct[, number.allcell:=ifelse(sampleid.pid %in% names(celltotalnumber), celltotalnumber[sampleid.pid], NA)]
+
+dtf.s.pct[is.na(number.allcell)][,.N] # 175
+
+metacols = c("pid", "sampleid", "subjectid", "group", "group.detail", "tissue", "tissue.detail")
+
+dtf.s.pct = cbind(dtf.s.pct,
+                  samplemeta[match(dtf.s.pct$sampleid.pid,samplemeta$sampleid.pid)][,metacols, with = F])
+
+table(dtf.s.pct[is.na(number.allcell)]$pid)
+table(dtf.s.pct[tissue == "peripheral blood"]$pid)
+dtf.s.pct$neu.pct = dtf.s.pct$number.neutrophil / dtf.s.pct$number.allcell
+
+dtf.s.pct$source = samplemeta[match(dtf.s.pct$sampleid.pid, samplemeta$sampleid.pid)]$source
+dtf.s.pct$technique = samplemeta[match(dtf.s.pct$sampleid.pid, samplemeta$sampleid.pid)]$technique
+dtf.s.pct[,technique:=ifelse(grepl("Chromium",technique), "10x Chromium", technique)]
+
+dtf.s.pct.m = melt(dtf.s.pct,
+                   id.vars = c("group", "pid", "sampleid.pid", "tissue"),
+                   measure.vars = names(col_celltype))
+
+dtf.s.pct.m = as.data.table(dtf.s.pct.m)
+
+dtf.s.pct$source2 = gsub("_RBC.*", "", dtf.s.pct$source)
+dtf.s.pct$source2 = gsub("fresh", "fresh\n", dtf.s.pct$source2)
+dtf.s.pct$source2 = gsub("frozen", "frozen\n", dtf.s.pct$source2)
+dtf.s.pct$source2 = gsub("WB", "whole blood", dtf.s.pct$source2)
+dtf.s.pct$source2 = factor(dtf.s.pct$source2, levels = c("frozen\nPBMC", "fresh\nPBMC", "fresh\nwhole blood"))
+
+dtf.s.pct[,lapply(.SD, function(x){median(x)}), by = c("tissue"), .SDcols = c("neu.pct")]
+dtf.s.pct[,lapply(.SD, function(x){median(x)}), by = c("source2"), .SDcols = c("neu.pct")]
+
+saveRDS(dtf.s.pct, paste0(dir, "dtf.s.pct.v10f.rds"))
+```
+
+# Gene signatures
+
+```{r gene signatures}
+markers.neu = readRDS(paste0(dir, "markers.celltype.pc25.v10f.rds"))
+pseudobulk.pct = readRDS(paste0(dir, "pseudobulk.pct.celltype.sepsis_covid.v2.rds"))
+markers = readRDS(paste0(dir, "markers.neu.cell911733.sepsis_covid.v2.rds"))
+pseudobulk.pct = as.data.table(melt(pseudobulk.pct, id.vars = "celltype.v1"))
+
+neu.cluster.markers = sort(unique(markers.neu[avg_log2FC >= 1.6 & cluster != "immature"]$gene))
+length(neu.cluster.markers) # 208
+
+neu.cluster.inactive = setdiff(unique(markers.neu[cluster != "immature"]$cluster), sort(unique(markers.neu[avg_log2FC >= 1.6 & cluster != "immature"]$cluster)))
+
+neu.cluster.markers2 = markers.neu[avg_log2FC >= 0.8 & cluster %in% neu.cluster.inactive]$gene
+neu.cluster.markers = unique(c(neu.cluster.markers, neu.cluster.markers2))
+length(neu.cluster.markers) # 248
+
+genes.immature.neu = sort(markers[cluster == "Immat Neu" & avg_log2FC >= 2 & pct.1 >= 0.1 & pct.2 < 0.1]$gene)
+genes.total.neu = sort(markers[cluster == "total Neu" & avg_log2FC >= 2 & pct.1 >= 0.1 & pct.2 < 0.1]$gene)
+
+gene2 = unique(pseudobulk.pct[!celltype.v1 %in% c("Immat Neu", "Platelet", "Erythrocyte") & value > 0.1]$variable)
+genes.immature.neu = setdiff(genes.immature.neu, gene2)
+genes.immature.neu = intersect(genes.immature.neu, unique(markers.neu$gene))
+genes.immature.neu
+
+gene2 = unique(pseudobulk.pct[!celltype.v1 %in% c("Neu", "total Neu", "Immat Neu",  "Platelet", "Erythrocyte") & value > 0.1]$variable)
+genes.total.neu = setdiff(genes.total.neu, gene2)
+genes.total.neu = intersect(genes.total.neu, unique(markers.neu$gene))
+genes.total.neu
+
+neu.cluster.markers2 = unique(c(neu.cluster.markers, genes.total.neu, genes.immature.neu)) # 254
+length(neu.cluster.markers2) # 254
+
+# summary ----
+genes.immature.neu = c("AZU1", "BPI", "CAMP", "CEACAM8", "CRISP3", "DEFA3", "DEFA4", 
+                       "ELANE", "LCN2", "LTF", "MMP8", "MPO", "OLFM4")
+genes.total.neu = c("ALPL", "ANXA3", "CXCR1", "CYP4F3", "KCNJ15", "MME", "MMP9", 
+                    "PI3", "SLPI", "TNFRSF10C")
+genes.ifn = c("APOL6", "CMPK2", "DDX58", "EPSTI1", "GBP1", "GBP2", "GBP4", 
+              "GBP5", "HERC5", "HES4", "IFI44", "IFI44L", "IFI6", "IFIH1", 
+              "IFIT1", "IFIT2", "IFIT3", "IFIT5", "IFITM1", "IFITM3", "IRF7", 
+              "ISG15", "LY6E", "MT1X", "MT2A", "MX1", "OAS1", "OAS2", "OAS3", 
+              "OASL", "PARP14", "RSAD2", "SAMD9", "SAMD9L", "TNFSF10", "TNFSF13B", 
+              "XAF1")
+
+geneSets = list(genes.immature.neu, genes.total.neu, genes.ifn)
+names(geneSets) = c("genes.immature.neu", "genes.total.neu", "genes.ifn")
+
+signaturegenes = c("STMN1", "MKI67", "FUT4", "AZU1", "MPO", "PRTN3", "CTSG", "ELANE", 
+                   "DEFA4", "CEACAM6", "DEFA3", "BPI", "LYZ", "RETN", "ANXA1", "CEACAM8", 
+                   "OLFM4", "TCN1", "LTF", "LCN2", "MMP8", "CAMP", "CRISP3", "HP", 
+                   "PGLYRP1", "ANXA3", "FCN1", "ARG1", "PADI4", "CD177", "MMP9", 
+                   "NQO2", "CYP4F3", "S100A8", "S100A9", "S100A12", "TXN", "TSPO", 
+                   "PLAC8", "GPI", "OLR1",  "ORM1", "MME", "IL1R2", "TXNIP", 
+                   "FOS", "FOSB", "JUN", "EGR1", "G0S2", 
+                   "MT2A", "MT1X", "HES4", 
+                   "LY6E", "ISG15", "IFI44L", "IFI44", "OASL", "IFI6", "OAS3", "OAS2", 
+                   "RSAD2", "HERC5", "MX1", "IFIT1", "IFIT2", "IFIT3", "IFIT5", 
+                   "DDX58", "XAF1", "IRF7", "EPSTI1", "APOL6", "GBP5", "GBP4", "GBP2", 
+                   "GBP1", "PARP14",  "IFIH1", "TNFSF10", "IFITM1", "IFITM3", "CD274",
+                   
+                   "TNFAIP3", "NFKBIA", "CXCL8", "IL1B", "IL1RN", "CXCL1", "CXCL2", 
+                   "PPIF", "SPP1", "CDKN1A", "CD83", "SQSTM1", "PLAU", "CXCR4", 
+                   "CSTB", "LGALS3", "HMOX1", "VEGFA", "CCL3", "CCL4", "SLPI", "PI3", 
+                   "SIGLEC10", "ARHGAP26", "LUCAT1", "DOCK5" , "HSPA1B", 
+                   "DNAJB1", "HSPA5", "CD74", "HLA-DRA", "VCAN", "CD69", "IL7R", 
+                   "GNLY", "SELL",
+                   "KCNJ15", "TNFRSF10C", "ALPL", "CSF3R", "NAMPT", "FCGR3B", "CXCR1", 
+                   "CXCR2")
+
+neu.cluster.markers2 = unique(c(neu.cluster.markers2, signaturegenes))
+```
+
+# Calculate geometric mean of genes in neutrophil subsets
+
+```{r}
+srt.sct = readRDS("/labs/khatrilab/hongzheng/singlecell/neutrophil/rds/srt.harmony.v10f.rds")
+mat = t(as.matrix(srt.sct@assays$RNA@data)) + 1
+
+dtf[,celltype2:=ifelse(grepl("AZU1|LTF|MMP9",celltype), "granule subsets", celltype)]
+dtf[,celltype2:=ifelse(grepl("IFN",celltype), "IFN subsets", celltype2)]
+dtf[,celltype2:=ifelse(grepl("NF-κB|IL1B|CCL3|VEGFA|SLPI",celltype), "cytokine subsets", celltype2)]
+table(dtf$celltype2)
+
+#       AP-1         ARHGAP26             CD74 cytokine subsets
+#       50828            76169            61983           150469
+#        EGR1             G0S2  granule subsets              HSP
+#       17795           114702           251288            27612
+# IFN subsets            IL1R2              MME          Neu-Lym
+#      149261            28264           121211            76639
+#       TXNIP
+#       84805
+
+dtfgenes = as.data.table(cbind(dtf,mat))
+
+dtfgenes.mean = dtfgenes[,lapply(.SD, function(x){geomMean(x)}), 
+                         by = c("sampleid.pid", "celltype2", "pid", "group", "tissue", "source", "sex", "age"), 
+                         .SDcols = rownames(srt.sct@assays$RNA@data)]
+saveRDS(dtfgenes.mean, "/labs/khatrilab/hongzheng/singlecell/neutrophil/rds/dtfgenes.celltype2.mean.v10f.rds")
+
+dtfgenes.mean = dtfgenes[,lapply(.SD, function(x){geomMean(x)}), 
+                         by = c("sampleid.pid", "pid", "group", "tissue", "source", "sex", "age"), 
+                         .SDcols = rownames(srt.sct@assays$RNA@data)]
+saveRDS(dtfgenes.mean, "/labs/khatrilab/hongzheng/singlecell/neutrophil/rds/dtfgenes.allneu.mean.v10f.rds")
+
+dtfgenes.mean = dtfgenes[,lapply(.SD, function(x){geomMean(x)}), 
+                         by = c("sampleid.pid", "celltype", "pid", "group", "tissue", "source", "sex", "age"), 
+                         .SDcols = rownames(srt.sct@assays$RNA@data)]
+saveRDS(dtfgenes.mean, "/labs/khatrilab/hongzheng/singlecell/neutrophil/rds/dtfgenes.celltype.mean.v10f.rds")
+```
+
+# Meta-analysis of single-cell gene expression in infectious diseases
+
+```{r}
+dtfgenes.mean = readRDS(paste0(dir, "dtfgenes.celltype2.mean.v10f.rds"))
+dtf.s.pct = readRDS(paste0(dir, "dtf.s.pct.v10f.rds"))
+dtf.s.pct.infection = dtf.s.pct[pid %in% unique(dtf[grepl("COVID|sepsis|flu|conv",group)]$pid)][grepl("COVID|sepsis|flu|conv|healthy", group)][tissue %in% c("peripheral blood")][grepl("WB", source)] # 179
+dtf.s.pct.infection = dtf.s.pct.infection[neu.pct >= 0.05][number.neutrophil >= 100]
+dim(dtf.s.pct.infection) # 157
+table(dtf.s.pct.infection$group) 
+
+dtf.score.infect = dtfgenes.mean[pid %in% unique(dtf[grepl("COVID|sepsis|flu|conv",group)]$pid)][grepl("COVID|sepsis|flu|conv|healthy",group)][tissue %in% c("peripheral blood")][grepl("WB",source)]
+
+dtf.score.infect[,condition:=ifelse(group %in% c("COVID-19,nonsevere", "flu", "flu,pregnancy"), "COVID-19/flu,nonsevere",
+                                    ifelse(group %in% c("healthy", "convalescent"), "healthy/convalescent",group))]
+
+dtf.score.infect = dtf.score.infect[sampleid.pid %in% unique(dtf.s.pct.infection$sampleid.pid)]
+length(unique(dtf.s.pct.infection$sampleid.pid))
+length(unique(dtf.score.infect$sampleid.pid))
+
+dtf.score.infect$celltype = dtf.score.infect$celltype2
+
+gene2test = neu.cluster.markers2
+dtf.score.infect.m = melt(dtf.score.infect,
+                          id.vars = c("condition", "pid", "sampleid.pid", "celltype"),
+                          measure.vars = gene2test)
+dtf.score.infect.m = as.data.table(dtf.score.infect.m)
+dtf.score.infect.m$variable = paste0(dtf.score.infect.m$celltype, "#", dtf.score.infect.m$variable)
+
+ESlist.expr = list()
+for(id in c(paste0("granule subsets#", gene2test), paste0("IFN subsets#", gene2test))){
+  ESlist.expr[[paste0(id, ".COVID-19,severe.vs.healthy/convalescent")]] = metaStats(dtf.score.infect.m[order(pid)], geneid = id, pids = c("combes2021", "schrepping2020", "sinha2021", "wilk2021"), case = "COVID-19,severe", control = "healthy/convalescent")
+  
+  ESlist.expr[[paste0(id, ".COVID-19/flu,nonsevere.vs.healthy/convalescent")]] = metaStats(dtf.score.infect.m[order(pid)], geneid = id, pids = c("combes2021", "schrepping2020", "zhang2023"), case = "COVID-19/flu,nonsevere", control = "healthy/convalescent")
+  
+  ESlist.expr[[paste0(id, ".bacterial sepsis.vs.healthy/convalescent")]] = metaStats(dtf.score.infect.m[order(pid)], geneid = id, pids = c("combes2021", "kaiser2024", "kwok2023", "sinha2021"), case = "bacterial sepsis", control = "healthy/convalescent")
+}
+
+datadf.expr = rbindlist(ESlist.expr, idcol = 'group')
+datadf.expr = as.data.table(datadf.expr)
+datadf.expr = datadf.expr[rowname == "summary"]
+datadf.expr$gene = gsub(".*#", "",sapply(strsplit(datadf.expr$group, "\\."), "[[", 1))
+datadf.expr$celltype = gsub("#.*", "",sapply(strsplit(datadf.expr$group, "\\."), "[[", 1))
+datadf.expr$group = sapply(strsplit(datadf.expr$group, "\\."), "[[", 2)
+
+saveRDS(datadf.expr, paste0(dir, "infect.exprmeta.selectedgenes.neu100.v10f.rds"))
+
+# all neutrophils ----
+dtfgenes.mean = readRDS(paste0(dir, "dtfgenes.allneu.mean.v10f.rds"))
+
+dtf.score.infect = dtfgenes.mean[pid %in% unique(dtf[grepl("COVID|sepsis|flu|conv",group)]$pid)][grepl("COVID|sepsis|flu|conv|healthy",group)][tissue %in% c("peripheral blood")][grepl("WB",source)]
+
+dtf.score.infect[,condition:=ifelse(group %in% c("COVID-19,nonsevere", "flu", "flu,pregnancy"), "COVID-19/flu,nonsevere",
+                                    ifelse(group %in% c("healthy", "convalescent"), "healthy/convalescent", group))]
+
+dtf.score.infect = dtf.score.infect[sampleid.pid %in% unique(dtf.s.pct.infection$sampleid.pid)]
+length(unique(dtf.s.pct.infection$sampleid.pid))
+length(unique(dtf.score.infect$sampleid.pid))
+
+dtf.score.infect$celltype = "total neutrophil"
+
+dtf.score.infect.m = melt(dtf.score.infect,
+                          id.vars = c("condition", "pid", "sampleid.pid", "celltype"),
+                          measure.vars = gene2test)
+dtf.score.infect.m = as.data.table(dtf.score.infect.m)
+dtf.score.infect.m$variable = paste0(dtf.score.infect.m$celltype, "#", dtf.score.infect.m$variable)
+
+ESlist.expr = list()
+for(id in paste0("total neutrophil#", gene2test)){
+  ESlist.expr[[paste0(id, ".COVID-19,severe.vs.healthy/convalescent")]] = metaStats(dtf.score.infect.m[order(pid)], geneid = id, pids = c("combes2021", "schrepping2020", "sinha2021", "wilk2021"), case = "COVID-19,severe", control = "healthy/convalescent")
+  
+  ESlist.expr[[paste0(id, ".COVID-19/flu,nonsevere.vs.healthy/convalescent")]] = metaStats(dtf.score.infect.m[order(pid)], geneid = id, pids = c("combes2021", "schrepping2020", "zhang2023"), case = "COVID-19/flu,nonsevere", control = "healthy/convalescent")
+  
+  ESlist.expr[[paste0(id, ".bacterial sepsis.vs.healthy/convalescent")]] = metaStats(dtf.score.infect.m[order(pid)], geneid = id, pids = c("combes2021", "kaiser2024", "kwok2023", "sinha2021"), case = "bacterial sepsis", control = "healthy/convalescent")
+}
+
+datadf.expr = rbindlist(ESlist.expr, idcol = 'group')
+datadf.expr = as.data.table(datadf.expr)
+datadf.expr = datadf.expr[rowname == "summary"]
+datadf.expr$gene = gsub(".*#", "", sapply(strsplit(datadf.expr$group, "\\."), "[[", 1))
+datadf.expr$celltype = gsub("#.*", "", sapply(strsplit(datadf.expr$group, "\\."), "[[", 1))
+datadf.expr$group = sapply(strsplit(datadf.expr$group, "\\."), "[[", 2)
+
+saveRDS(datadf.expr, paste0(dir, "infect.exprmeta.selectedgenes.allneu.neu100.v10f.rds"))
+```
+
+# Meta-analysis of single-cell gene expression in cancer
+
+```{r}
+dtf.s.pct = readRDS(paste0(dir, "dtf.s.pct.v10f.rds"))
+dtf.s.pct.cancertissue = dtf.s.pct[!grepl("peripheral blood",tissue)][!grepl("han2020",pid)]
+dtf.s.pct.cancertissue = dtf.s.pct.cancertissue[grepl("cancer",group)]
+samplemeta.cancer = fread(paste0(dir, "samplemta.cancer.v10f.csv"))
+dtf.s.pct.cancertissue$stage = samplemeta.cancer[match(dtf.s.pct.cancertissue$sampleid.pid, samplemeta.cancer$sampleid.pid)]$stage
+dtf.s.pct.cancertissue$type = samplemeta.cancer[match(dtf.s.pct.cancertissue$sampleid.pid, samplemeta.cancer$sampleid.pid)]$type
+dtf.s.pct.cancertissue$treatment = samplemeta.cancer[match(dtf.s.pct.cancertissue$sampleid.pid, samplemeta.cancer$sampleid.pid)]$treatment
+dtf.s.pct.cancertissue = dtf.s.pct.cancertissue[number.neutrophil >= 50]
+table(dtf.s.pct.cancertissue$pid, dtf.s.pct.cancertissue$type)
+
+dtfgenes.mean = readRDS(paste0(dir, "dtfgenes.celltype.mean.v10f.rds"))
+dtf.score.cancer = dtfgenes.mean[!grepl("peripheral blood",tissue)][!grepl("han2020",pid)][grepl("cancer",group)][pid %in% c("hu2022", "salcher2022", "wu2024")][sampleid.pid %in% dtf.s.pct.cancertissue$sampleid.pid]
+
+dtf.score.cancer$type = samplemeta.cancer[match(dtf.score.cancer$sampleid.pid, samplemeta.cancer$sampleid.pid)]$type
+dtf.score.cancer$treatment = samplemeta.cancer[match(dtf.score.cancer$sampleid.pid, samplemeta.cancer$sampleid.pid)]$treatment
+
+dtf.score.cancer = dtf.score.cancer[treatment %in% c("pre-treatment")]
+dtf.score.cancer$condition = dtf.score.cancer$type
+
+dtfgenes.mean = readRDS(paste0(dir, "dtfgenes.allneu.mean.v10f.rds"))
+
+dtf.score.cancer = dtfgenes.mean[!grepl("peripheral blood",tissue)][!grepl("han2020",pid)][grepl("cancer",group)][pid %in% c("hu2022", "salcher2022", "wu2024")][sampleid.pid %in% dtf.s.pct.cancertissue$sampleid.pid]
+
+dtf.score.cancer$type = samplemeta.cancer[match(dtf.score.cancer$sampleid.pid, samplemeta.cancer$sampleid.pid)]$type
+dtf.score.cancer$treatment = samplemeta.cancer[match(dtf.score.cancer$sampleid.pid, samplemeta.cancer$sampleid.pid)]$treatment
+
+dtf.score.cancer = dtf.score.cancer[treatment %in% c("pre-treatment")]
+
+dtf.score.cancer$condition = dtf.score.cancer$type
+dtf.score.cancer$celltype = "total neutrophil"
+
+gene2test = neu.cluster.markers2
+
+dtf.score.cancer.m = melt(dtf.score.cancer,
+                          id.vars = c("condition","pid", "sampleid.pid", "celltype"),
+                          measure.vars = gene2test)
+dtf.score.cancer.m = as.data.table(dtf.score.cancer.m)
+dtf.score.cancer.m$variable = paste0(dtf.score.cancer.m$celltype,"#",dtf.score.cancer.m$variable)
+
+ESlist.expr = list()
+for(id in c(paste0("total neutrophil#", gene2test))){
+  ESlist.expr[[paste0(id,".cancer.vs.adjacent")]] = metaStats(dtf.score.cancer.m[order(pid)], geneid = id, pids = c("hu2022", "salcher2022", "wu2024"), case = "cancer", control = "adjacent")
+}
+
+datadf.expr = rbindlist(ESlist.expr, idcol = 'group')
+datadf.expr = as.data.table(datadf.expr)
+
+datadf.expr$gene = gsub(".*#","",sapply(strsplit(datadf.expr$group,"\\."), "[[", 1))
+datadf.expr$celltype = gsub("#.*","",sapply(strsplit(datadf.expr$group,"\\."), "[[", 1))
+
+datadf.expr$group = sapply(strsplit(datadf.expr$group,"\\."), "[[", 2)
+
+saveRDS(datadf.expr, paste0(dir, "cancer.exprmeta.selectedgenes.allneu.v10f.rds"))
+```
+
+# Meta-analysis of single-cell gene expression between sexes
+
+```{r Meta-analysis of single-cell gene expression between sexes}
+dtf.s.pct = readRDS(paste0(dir, "dtf.s.pct.v10f.rds"))
+dtf.s.pct.sex = dtf.s.pct[group == "healthy"][tissue %in% c("peripheral blood")][grepl("WB", source) | grepl("wigerblad2022|gupta2020|montaldo2022", pid)]
+dtf.s.pct.sex[,.N]
+dtf.s.pct.sex$sex = samplemeta[match(dtf.s.pct.sex$sampleid.pid, samplemeta$sampleid.pid)]$sex
+dtf.s.pct.sex$age = samplemeta[match(dtf.s.pct.sex$sampleid.pid, samplemeta$sampleid.pid)]$age
+dtf.s.pct.sex = dtf.s.pct.sex[!sex %in% c("unknown")]
+dtf.s.pct.sex = dtf.s.pct.sex[neu.pct >= 0.05 | is.na(neu.pct)][number.neutrophil >= 100]
+table(dtf.s.pct.sex$sex, dtf.s.pct.sex$pid)
+pids = c("gupta2020", "kwok2023", "wigerblad2022", "sinha2021", "kaiser2024")
+
+dtfgenes.mean = readRDS(paste0(dir, "dtfgenes.allneu.mean.v10f.rds"))
+dtf.score.sex = dtfgenes.mean[group == "healthy"][tissue %in% c("peripheral blood")][grepl("WB", source) | grepl("wigerblad2022|gupta2020|montaldo2022", pid)][sampleid.pid %in% dtf.s.pct.sex$sampleid.pid]
+
+gene2test = neu.cluster.markers2
+
+dtf.score.sex$condition = dtf.score.sex$sex
+dtf.score.sex$celltype = "total neutrophil"
+dtf.score.sex.m = melt(dtf.score.sex,
+                       id.vars = c("condition","pid", "sampleid.pid", "celltype"),
+                       measure.vars = gene2test)
+dtf.score.sex.m = as.data.table(dtf.score.sex.m)
+dtf.score.sex.m$variable = paste0(dtf.score.sex.m$celltype,"#",dtf.score.sex.m$variable)
+
+ESlist.expr = list()
+for(id in c(paste0("total neutrophil#", gene2test))){
+  ESlist.expr[[paste0(id,".M.vs.F")]] = metaStats(dtf.score.sex.m[order(pid)], geneid = id, pids = pids, case = "M", control = "F")
+}
+
+datadf.expr = rbindlist(ESlist.expr, idcol = 'group')
+datadf.expr = as.data.table(datadf.expr)
+
+datadf.expr$gene = gsub(".*#","",sapply(strsplit(datadf.expr$group,"\\."), "[[", 1))
+datadf.expr$celltype = gsub("#.*","",sapply(strsplit(datadf.expr$group,"\\."), "[[", 1))
+
+datadf.expr$group = sapply(strsplit(datadf.expr$group,"\\."), "[[", 2)
+
+saveRDS(datadf.expr, paste0(dir, "sex.exprmeta.selectedgenes.allneu.v10f.rds"))
+```
+
+# RNA-seq analysis of purified neutrophils (E-GEAD-397)
+
+```{r}
+meta = fread("/labs/khatrilab/Resources/data/ota2021/clinical_diagnosis_age_sex_v2.txt")
+
+neu.mat.list = list()
+for (celltype in c("Neu", "LDG")){
+  expr = fread(paste0("/labs/khatrilab/Resources/data/ota2021/", celltype, "_count.txt"))
+  expr.mat = as.matrix(expr[,3:ncol(expr)])
+  rownames(expr.mat) = expr$Gene_id
+  neu.mat.list[[celltype]] = expr.mat
+}
+
+dim(neu.mat.list$Neu) # 53344   406
+dim(neu.mat.list$LDG) # 53344   168
+all.equal(rownames(neu.mat.list$Neu), rownames(neu.mat.list$LDG))
+length(intersect(colnames(neu.mat.list$Neu), colnames(neu.mat.list$LDG))) # 163
+
+expandedids = unique(c(colnames(neu.mat.list$Neu), colnames(neu.mat.list$LDG))) # 411
+
+id.neu.add = setdiff(expandedids, colnames(neu.mat.list$Neu))  
+mat.neu.add = matrix(data = 0, nrow = nrow(neu.mat.list$Neu), ncol = length(id.neu.add))
+rownames(mat.neu.add) = rownames(neu.mat.list$Neu)
+colnames(mat.neu.add) = id.neu.add
+mat.neu = cbind(neu.mat.list$Neu, mat.neu.add)
+mat.neu = mat.neu[,expandedids]
+
+id.LDG.add = setdiff(expandedids, colnames(neu.mat.list$LDG))  
+mat.LDG.add = matrix(data = 0, nrow = nrow(neu.mat.list$LDG), ncol = length(id.LDG.add))
+rownames(mat.LDG.add) = rownames(neu.mat.list$LDG)
+colnames(mat.LDG.add) = id.LDG.add
+mat.LDG = cbind(neu.mat.list$LDG, mat.LDG.add)
+mat.LDG = mat.LDG[,expandedids]
+
+mat.neu2 = mat.neu + mat.LDG
+
+expr = fread(paste0("/labs/khatrilab/Resources/data/ota2021/", "Neu", "_count.txt"))
+keys = expr$Gene_name
+names(keys) = expr$Gene_id
+
+geneszeropct = apply(mat.neu2, 1, function(x){mean(x == 0)})
+genes2keep = names(which(geneszeropct < 0.5))
+print(length(genes2keep)) # 17016
+mat.neu2 = mat.neu2[genes2keep, ]
+keys = keys[genes2keep]
+
+mat.VST = varianceStabilizingTransformation(mat.neu2, blind = TRUE, fitType = "parametric")
+meta.order = meta[match(colnames(mat.VST),meta$id), ]
+exprlist=list(expr = mat.VST,
+              count = mat.neu2,
+              pheno = meta.order,
+              keys = keys[rownames(mat.VST)]
+)
+
+exprlist$expr = GetRownamesCombineDuplicate(geneMtx = exprlist$expr, keys = exprlist$keys)
+exprlist$count = GetRownamesCombineDuplicate(geneMtx = exprlist$count, keys = exprlist$keys)
+exprlist$keys = NULL
+
+exprobj[["Neu_LDG"]] = exprlist
+saveRDS(exprobj, "/labs/khatrilab/Resources/data/ota2021/ota2021.exprlist.rds")
+```
+
+```{r}
+meta = fread("/labs/khatrilab/Resources/data/ota2021/clinical_diagnosis_age_sex_v2.txt")
+exprobj = readRDS("/labs/khatrilab/Resources/data/ota2021/ota2021.exprlist.rds")
+
+# sex difference ----
+meta.hc = meta[disease == "HC"]
+dim(exprobj$Neu_LDG$count) # 16935   411
+countmat = round(exprobj$Neu_LDG$count, 0)
+
+rownames(countmat)[grepl("^AC0", rownames(countmat))]
+rownames(countmat)[grepl("^AL[0-9]", rownames(countmat))]
+countmat = countmat[rownames(countmat)[!grepl("^AP[0-9]|^AF[0-9]|^AC[0-9]|^AL[0-9]|-AS1$", rownames(countmat))],]
+dim(countmat) # 13620   411
+
+meta.hc = meta.hc[id %in% colnames(exprobj$Neu_LDG$count)]
+meta.hc = as.data.frame(meta.hc)
+rownames(meta.hc) = meta.hc$id
+meta.hc$sex <- factor(meta.hc$sex, levels = c("F", "M"))
+
+# > table(meta.hc$sex)
+#  F  M 
+# 58 20 
+# > summary(meta.hc[meta.hc$sex == "F",]$age)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   22.00   41.50   50.00   49.52   58.00   74.00 
+# > summary(meta.hc[meta.hc$sex == "M",]$age)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   21.00   29.75   36.00   42.90   58.25   85.00 
+# > summary(meta.hc$age)
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   21.00   37.25   48.00   47.82   58.00   85.00 
+
+dds = DESeqDataSetFromMatrix(countData = countmat[,meta.hc$id],
+                             colData = meta.hc,
+                             design = ~ sex)
+dds = DESeq(dds)
+res = results(dds, contrast=c("sex", "M", "F"))
+
+res = as.data.frame(res)
+res$FDR = p.adjust(res$pvalue, method = "fdr")
+
+res$gene = rownames(res)
+res = as.data.table(res)
+res[,inset:=ifelse(gene %in% genes.immature.neu, "immat neu genes", 
+                   ifelse(gene %in% genes.ifn, "neu IFN genes", "other"))]
+
+fwrite(res, "/labs/khatrilab/Resources/data/ota2021/ota2021.Neu_LDG.sex.DEG.csv")
+
+# scores ----
+countmat = round(exprobj$Neu_LDG$count,0)
+mat.VST = varianceStabilizingTransformation(countmat, blind = TRUE, fitType = "parametric")
+
+shareid = intersect(meta$id, colnames(mat.VST))
+length(shareid) # 411
+mat.VST = mat.VST[,shareid]
+meta.s = meta[id %in% shareid]
+all.equal(meta.s$id, colnames(mat.VST))
+
+meta.s$IMNeuS = getGeneScores(mat.VST, genes.immature.neu, "")
+meta.s$TNeuS = getGeneScores(mat.VST, genes.total.neu, "")
+meta.s$IFNS = getGeneScores(mat.VST, genes.ifn, "")
+
+saveRDS(meta.s, "/labs/khatrilab/Resources/data/ota2021/ota2021.Neu_LDG.scores.rds")
+```
+
+# Meta-analysis of bulk transcriptome between sexes
+
+```{r}
+sexdatasets = readRDS("/labs/khatrilab/hongzheng/other/sex/datasets.sexMeta.rds")
+
+datasettissuetype = sapply(sexdatasets, function(x){unique(x$pheno$tissue)})
+sexdatasets.WB = sexdatasets[names(which(datasettissuetype == "Whole blood"))]
+sexdatasets.PBMC = sexdatasets[names(which(datasettissuetype == "PBMC"))]
+
+sapply(sexdatasets, function(x){table(x$pheno$sex)})
+
+
+sexMeta.WB = MetaIntegrator::runMetaAnalysis(list(originalData = sexdatasets.WB), runLeaveOneOutAnalysis = F)
+sexMeta.PBMC = MetaIntegrator::runMetaAnalysis(list(originalData = sexdatasets.PBMC), runLeaveOneOutAnalysis = F)
+
+dtf.sexMeta.WB = sexMeta.WB$metaAnalysis$pooledResults
+dtf.sexMeta.PBMC = sexMeta.PBMC$metaAnalysis$pooledResults
+
+dtf.sexMeta.WB$gene = rownames(dtf.sexMeta.WB)
+dtf.sexMeta.PBMC$gene = rownames(dtf.sexMeta.PBMC)
+
+dtf.sexMeta.WB = as.data.table(dtf.sexMeta.WB)
+dtf.sexMeta.PBMC = as.data.table(dtf.sexMeta.PBMC)
+
+sharedgenes = intersect(dtf.sexMeta.WB$gene, dtf.sexMeta.PBMC$gene)
+
+dtf.sexMeta.WB = dtf.sexMeta.WB[gene %in% sharedgenes][order(gene)]
+dtf.sexMeta.PBMC = dtf.sexMeta.PBMC[gene %in% sharedgenes][order(gene)]
+all.equal(dtf.sexMeta.WB$gene, dtf.sexMeta.PBMC$gene)
+
+dtf.sexMeta.WB.tmp = dtf.sexMeta.WB[,c("effectSize", "effectSizeStandardError", "effectSizePval", "effectSizeFDR",  "numStudies")]
+dtf.sexMeta.PBMC.tmp = dtf.sexMeta.PBMC[,c("effectSize", "effectSizeStandardError", "effectSizePval", "effectSizeFDR", "numStudies")]
+
+colnames(dtf.sexMeta.WB.tmp) = paste0(colnames(dtf.sexMeta.WB.tmp), ".WB")
+colnames(dtf.sexMeta.PBMC.tmp) = paste0(colnames(dtf.sexMeta.PBMC.tmp), ".PBMC")
+
+dtf.sexMeta = data.table(gene = dtf.sexMeta.WB$gene)
+
+allGeneLocations_dict = readRDS("/labs/khatrilab/hongzheng/other/sex/allGeneLocations_dict.rds")
+dtf.sexMeta$chr = allGeneLocations_dict[dtf.sexMeta$gene]
+dtf.sexMeta = cbind(dtf.sexMeta, dtf.sexMeta.WB.tmp, dtf.sexMeta.PBMC.tmp)
+saveRDS(dtf.sexMeta, "/labs/khatrilab/hongzheng/other/sex/dtf.sexMeta.rds")
+```
+
+
