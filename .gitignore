@@ -1,0 +1,28 @@
+# SCAHN — published analysis code.
+#
+# ALLOWLIST, not a blocklist: everything at the repo root is ignored, and only
+# what is published is re-included below. A mistake here makes a file missing,
+# never leaked -- which is the point, since this tree also holds ~62 GB of data
+# and results, some of it access-restricted.
+#
+# Deliberately NOT published: data/, results/, figures/, CURATION.md and
+# CHANGELOG.md (internal working notes), and any local_* script.
+
+/*
+
+!/.gitignore
+!/README.md
+!/LICENSE
+!/scripts/
+
+# local_ scripts read restricted data or are local provenance records.
+scripts/**/local_*
+
+# Editor / R / Python cruft, in case any appears under scripts/
+.Rhistory
+.RData
+.Rproj.user/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
