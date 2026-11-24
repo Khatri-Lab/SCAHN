@@ -37,6 +37,31 @@ Explore the atlas online at **<https://scahn.khatrilab.org/>**. Enter a gene or 
 Both plot pages can restrict the cells to a tissue, condition or study, and
 every figure downloads as PNG and PDF.
 
+## Map your data onto SCAHN
+
+A [Symphony](https://github.com/immunogenomics/symphony) reference lets you map
+your own single-cell data onto SCAHN on your own machine:
+**[download from Box](https://stanfordmedicine.box.com/s/axydaf0inij6v9w6lkmd5ktoqzhh6fqg)**.
+The package contains:
+
+- `SCAHN.symphony.reference.slim.rds` (205 MB): the Symphony reference
+- `SCAHN.harmony_SCT.v2000.PC25.uwot.model` (1.15 GB): the UMAP model, which
+  places your cells on the published SCAHN UMAP
+- `map_to_SCAHN.R`: an example R script, which maps a Seurat object and adds
+  the SCAHN subset label, a confidence score, the SCAHN embedding and UMAP
+  coordinates
+- `README.md`: requirements and how it works
+- `MD5SUMS`: checksums
+
+Before you start:
+
+- **Input**: neutrophils only, with human gene symbols and raw counts. Every
+  cell gets a SCAHN subset label, so remove other cell types first. For other
+  species, convert genes to one-to-one human orthologs first.
+- **Package versions**: the UMAP model is sensitive to them. It was tested with
+  symphony 0.1.2, uwot 0.1.16 and RcppAnnoy 0.0.23.
+- **Checksums**: check the files after downloading with `md5sum -c MD5SUMS`.
+
 ## Layout
 
 ```
